@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>试题编辑器</title>
+    <!-- 引入Vue -->
+    <script src="https://unpkg.com/vue@2.6.14/dist/vue.min.js"></script>
+    <!-- 引入Element UI -->
+    <link rel="stylesheet" href="https://unpkg.com/element-ui/lib/theme-chalk/index.css">
+    <script src="https://unpkg.com/element-ui/lib/index.js"></script>
+    <!-- 引入PDF.js -->
+    <script src="https://unpkg.com/pdfjs-dist@2.11.338/build/pdf.min.js"></script>
+    <script src="https://unpkg.com/pdfjs-dist@2.11.338/build/pdf.worker.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }
+        #app {
+            width: 100%;
+            height: 100%;
+        }
+        .container {
+            display: flex;
+            height: 100%;
+            width: 100%;
+        }
+        .pdf-container {
+            flex: 1;
+            border-right: 1px solid #ddd;
+            margin: 20px;
+            position: relative;
+            overflow-y: auto;
+            overflow-x: hidden;
+            height: calc(100vh - 40px);
+        }
+        #pdf-viewer {
+            position: relative;
+            margin: 0 auto;
+            width: 100%;
+            min-height: 100%;
+        }
+        .pdf-page {
+            position: relative;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .info-container {
+            width: 800px;
+            padding: 20px;
+            background: #f5f7fa;
+            height: 100vh;
+            overflow-y: auto;
+        }
+        .box-container {
+            position: absolute;
+            border: 2px solid #409EFF;
+            background-color: rgba(64, 158, 255, 0.1);
+            cursor: move;
+        }
+        .box-container.dragging {
+            cursor: grabbing;
+        }
+        .box-resize-handle {
+            position: absolute;
+            width: 8px;
+            height: 8px;
+            background: #fff;
+            border: 1px solid #409EFF;
+            cursor: se-resize;
+        }
+        .box-resize-handle.resizing {
+            cursor: grabbing;
+        }
+        .box-page-info {
+            position: absolute;
+            top: -20px;
+            left: 0;
+            color: #409EFF;
+            font-size: 12px;
+        }
+        .box-size-indicator {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 12px;
+            pointer-events: none;
+            white-space: nowrap;
+            z-index: 1000;
+        }
+        .preview-box {
+            position: absolute;
+            border: 2px solid #409EFF;
+            background-color: rgba(64, 158, 255, 0.1);
+            pointer-events: none;
+            z-index: 1000;
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div class="container">
+            <div class="pdf-container">
+                <div id="pdf-viewer"></div>
+                <div v-if="isDrawing && currentBox" 
+                     class="preview-box"
+                     :style="{
+                         left: currentBox.x + 'px',
+                         top: currentBox.y + 'px',
+                         width: currentBox.width + 'px',
+                         height: currentBox.height + 'px'
+                     }">
+                </div>
+                <div v-for="box in boxes" 
+                     :key="box.id" 
+                     class="box-container"
+                     :style="{
+                         left: box.x + 'px',
+                         top: box.y + 'px',
+                         width: box.width + 'px',
+                         height: box.height + 'px'
+                     }"
+                     @mousedown="startDrag($event, box)">
+                    <div class="box-resize-handle" 
+                         style="right: -4px; bottom: -4px;"
+                         @mousedown="startResize($event, box)"></div>
+                    <div class="box-page-info">
+                        第{{box.page}}页
+                    </div>
+                </div>
+            </div>
+            <div class="info-container">
+                <div class="page-jump" style="margin-bottom: 20px;">
+                    <el-input-number 
+                        v-model="jumpToPage" 
+                        :min="1" 
+                        :max="pdfDoc ? pdfDoc.numPages : 1"
+                        size="small"
+                        style="width: 130px;"
+                        placeholder="页码">
+                    </el-input-number>
+                    <el-button 
+                        type="primary" 
+                        size="small" 
+                        @click="jumpToPageHandler"
+                        style="margin-left: 10px;">
+                        跳转
+                    </el-button>
+                    <span style="margin-left: 10px; color: #909399; font-size: 14px;" v-if="pdfDoc">
+                        共 {{pdfDoc.numPages}} 页
+                    </span>
+                </div>
+                <el-form label-width="80px">
+                    <el-form-item label="题目类型">
+                        <el-select v-model="currentQuestion.type" placeholder="请选择题目类型">
+                            <el-option label="单选题" value="single"></el-option>
+                            <el-option label="多选题" value="multiple"></el-option>
+                            <el-option label="判断题" value="judge"></el-option>
+                        </el-select>
+                    </el-form-item>
+                    <el-form-item label="题干">
+                        <el-input type="textarea" v-model="currentQuestion.stem" rows="4"></el-input>
+                    </el-form-item>
+                    <el-form-item label="选项">
+                        <div v-for="(option, index) in currentQuestion.options" :key="index">
+                            <el-input v-model="currentQuestion.options[index]" style="margin-bottom: 10px">
+                                <template slot="prepend">{{String.fromCharCode(65 + index)}}</template>
+                                <el-button slot="append" icon="el-icon-delete" @click="removeOption(index)"></el-button>
+                            </el-input>
+                        </div>
+                        <el-button type="text" @click="addOption">添加选项</el-button>
+                    </el-form-item>
+                    <el-form-item label="答案">
+                        <el-select v-model="currentQuestion.answer" multiple placeholder="请选择答案" v-if="currentQuestion.type === 'multiple'">
+                            <el-option v-for="(_, index) in currentQuestion.options"
+                                     :key="index"
+                                     :label="String.fromCharCode(65 + index)"
+                                     :value="String.fromCharCode(65 + index)">
+                            </el-option>
+                        </el-select>
+                        <el-select v-model="currentQuestion.answer" placeholder="请选择答案" v-else-if="currentQuestion.type === 'single'">
+                            <el-option v-for="(_, index) in currentQuestion.options"
+                                     :key="index"
+                                     :label="String.fromCharCode(65 + index)"
+                                     :value="String.fromCharCode(65 + index)">
+                            </el-option>
+                        </el-select>
+                        <el-radio-group v-model="currentQuestion.answer" v-else>
+                            <el-radio label="true">正确</el-radio>
+                            <el-radio label="false">错误</el-radio>
+                        </el-radio-group>
+                    </el-form-item>
+                    <el-form-item label="框信息">
+                        <div v-for="box in boxes" :key="box.id" style="margin-bottom: 10px;">
+                            <el-tag closable @close="removeBox(box.id)" type="info">
+                                第{{box.page}}页: ({{box.xInMm}}, {{box.yInMm}}) - {{box.widthInMm}}×{{box.heightInMm}}
+                            </el-tag>
+                        </div>
+                    </el-form-item>
+                </el-form>
+                <div style="margin-top: 20px">
+                    <el-button type="primary" @click="saveQuestion">保存题目</el-button>
+                    <el-button @click="nextQuestion">下一题</el-button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- 确保Vue和Element UI加载完成后再加载应用代码 -->
+    <script>
+        // 等待DOM加载完成
+        document.addEventListener('DOMContentLoaded', function() {
+            // 确保Vue和Element UI都已加载
+            if (typeof Vue !== 'undefined' && typeof ELEMENT !== 'undefined') {
+                // 加载应用代码
+                const script = document.createElement('script');
+                script.src = 'app.js';
+                document.body.appendChild(script);
+            } else {
+                console.error('Vue or Element UI not loaded');
+            }
+        });
+    </script>
+</body>
+</html> 
